@@ -1,0 +1,112 @@
+# Build JAVA applications using Apache Maven (http://maven.apache.org)
+# For docker image tags see https://hub.docker.com/_/maven/
+#
+# For general lifecycle information see https://maven.apache.org/guides/introduction/introduction-to-the-lifecycle.html
+
+# This template will build and test your projects
+# * Caches downloaded dependencies and plugins between invocation.
+# * Verify but don't deploy merge requests.
+# * Deploy built artifacts from master branch only.
+
+
+variables:
+  IMAGE: jpizast/gitlab-nexus-iq-pipeline:2.7.1-SNAPSHOT
+  # IMAGE: sonatype/gitlab-nexus-iq-pipeline:2.6.2-01
+  # IMAGE: sonatype/gitlab-nexus-iq-pipeline:latest
+  # IMAGE: etita/gitlab-nexus-iq-pipeline:2.5.2-SNAPSHOT
+  # image: etita/gitlab-nexus-iq-pipeline:1.184.0-SNAPSHOT
+
+
+  # `showDateTime` will show the passed time in milliseconds. You need to specify `--batch-mode` to make this work.
+  MAVEN_OPTS: >-
+    -Dhttps.protocols=TLSv1.2
+    -Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository
+    -Dorg.slf4j.simpleLogger.showDateTime=true
+    -Djava.awt.headless=true
+
+  # As of Maven 3.3.0 instead of this you MAY define these options in `.mvn/maven.config` so the same config is used
+  # when running from the command line.
+  # As of Maven 3.6.1, the use of `--no-tranfer-progress` (or `-ntp`) suppresses download and upload messages. The use
+  # of the `Slf4jMavenTransferListener` is no longer necessary.
+  # `installAtEnd` and `deployAtEnd` are only effective with recent version of the corresponding plugins.
+  MAVEN_CLI_OPTS: >-
+    --batch-mode
+    --errors
+    --fail-at-end
+    --show-version
+    --no-transfer-progress
+    -DinstallAtEnd=true
+    -DdeployAtEnd=true
+  # Enable Debug level logging> https://docs.gitlab.com/ee/user/application_security/troubleshooting_application_security.html#debug-level-logging
+  SECURE_LOG_LEVEL: "debug"
+
+# This template uses the latest Maven 3 release, e.g., 3.8.6, and OpenJDK 8 (LTS)
+image: maven:3-openjdk-8
+
+# Cache downloaded dependencies and plugins between builds.
+# To keep cache across branches add 'key: "$CI_JOB_NAME"'
+# Be aware that `mvn deploy` will install the built jar into this repository. If you notice your cache size
+# increasing, consider adding `-Dmaven.install.skip=true` to `MAVEN_OPTS` or in `.mvn/maven.config`
+cache:
+  paths:
+    - .m2/repository
+    - target
+
+build:
+  stage: build
+  image: maven:3-openjdk-17
+  script:
+    - echo "Make it quick!"
+    - mvn $MAVEN_CLI_OPTS clean package -Pdist -Pindex
+    - cp *.zip target
+  
+build-js:
+  stage: build
+  image: node:22-alpine
+  script:
+    - 'npm i'
+
+iq_policy_eval:
+  stage: test
+  image: $IMAGE
+  script:
+    #- /sonatype/evaluate --ignore-scanning-errors -r scan-result.json -ra -res JAVA_MAIN -i atlas-team-app **/*.jar **/*.zip
+    #- /sonatype/evaluate --ignore-scanning-errors -r scan-result.json -rajs -i atlas-team-app -X -ire -rjr 'unknownfolder' -rje 'app/unknown/**' -rjs 'app/**' package-lock.json
+    # exit code 3 reachability error
+    - /sonatype/evaluate --ignore-scanning-errors -r scan-result.json -ire -rajs -i atlas-team-app clean-project/package-lock.json
+  artifacts:
+    when: always
+    reports:
+      dotenv: evaluate.env
+    name: "atlas-team-app-policy-eval-report"
+    paths:
+      - scan-result.json
+      - atlas-team-app-policy-eval-report.html
+
+dependency_scanning:
+  needs: ["iq_policy_eval"]
+  stage: test
+  when: always
+  image: $IMAGE
+  script:
+    - /sonatype/create-vulnerability-report -r scan-result.json --report-file gl-dep-scanning.json
+  artifacts:
+    when: always
+    reports: 
+      dependency_scanning: gl-dep-scanning.json
+  
+download_sbom:
+  needs: ["iq_policy_eval", "dependency_scanning"]
+  when: always
+  stage: deploy
+  # image: etita/gitlab-nexus-iq-pipeline:1.184.0-SNAPSHOT
+  # image: sonatype/gitlab-nexus-iq-pipeline:1.183.0-01
+  image: $IMAGE
+  before_script: |
+    echo "NEXUS_IQ_SCAN_ID: ${NEXUS_IQ_SCAN_ID}"
+  script:
+    - /sonatype/fetch-sbom -i atlas-team-app -si ${NEXUS_IQ_SCAN_ID} -ss cycloneDx -sv 1.5 -sf json -n sbom.cdx.json -udl
+  artifacts:
+    when: always
+    reports:
+      cyclonedx: sbom.cdx.json
