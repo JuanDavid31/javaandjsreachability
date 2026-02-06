@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(java -jar:*)",
+      "Bash(curl:*)"
+    ]
+  }
+}
